@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.tsbuildinfo
+node_modules/
+dist/
+storage/uploads/
+storage/chroma/
+storage/models/
+storage/*.sqlite3
+storage/*.db
+/backend/storage/
+*.log
