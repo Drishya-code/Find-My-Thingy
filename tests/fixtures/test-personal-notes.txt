@@ -1,0 +1,4 @@
+Synthetic personal study preferences for automated testing only.
+Preferred editor: VS Code.
+Preferred theme: Dark mode.
+Favourite programming language: C++.

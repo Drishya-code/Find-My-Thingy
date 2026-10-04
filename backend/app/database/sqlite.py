@@ -31,5 +31,11 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL, detail TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS personal_memories (
+          id TEXT PRIMARY KEY, content TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_memory_content_nocase
+          ON personal_memories(content COLLATE NOCASE);
         PRAGMA foreign_keys=ON;
         """)

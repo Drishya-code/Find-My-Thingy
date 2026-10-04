@@ -4,6 +4,15 @@ from app.services.embeddings import encode
 
 client = chromadb.PersistentClient(path=str(settings.data_dir / "chroma"))
 collection = client.get_or_create_collection("recall_chunks", metadata={"hnsw:space": "cosine"})
+DISTANCE_METRIC = (collection.metadata or {}).get("hnsw:space", "l2").lower()
+
+def relevance(distance, metric=DISTANCE_METRIC):
+    """Convert Chroma distances to a 0..1 estimate using this collection's metric."""
+    distance=max(0.0,float(distance))
+    if metric.lower() == "l2":
+        return 1.0/(1.0+distance)
+    # Chroma cosine and inner-product distances are represented as 1 - similarity.
+    return max(0.0,min(1.0,1.0-distance))
 
 def add(document_id, filename, chunks):
     if not chunks: return

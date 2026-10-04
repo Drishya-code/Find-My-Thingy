@@ -1,5 +1,6 @@
 import hashlib, uuid
 import re
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -8,12 +9,44 @@ from app.database.sqlite import connect
 from app.schemas import ChatRequest, ChatResponse, Source
 from app.services.extract import extract
 from app.services.chunking import chunk_pages
-from app.services.vector_store import add, search, remove_document, collection
+from app.services.vector_store import add, search, remove_document, collection, relevance
 from app.services.memory import extract_memories
 from app.services import ollama
 
 router = APIRouter(prefix="/api")
+logger=logging.getLogger(__name__)
 ALLOWED = {".pdf":"pdf", ".txt":"txt", ".md":"md"}
+REFUSAL = "I couldn't find sufficiently relevant information in your saved memories or documents."
+REMEMBER = re.compile(r"^\s*(?:remember(?:\s+that|\s+this)?|don't\s+forget(?:\s+that)?|do\s+not\s+forget(?:\s+that)?|save\s+this\s+for\s+later|keep\s+this\s+in\s+my\s+memory)\s*[:,-]?\s*(.+?)\s*[.!?]*\s*$", re.I)
+
+def _memory_intent(question):
+    match = REMEMBER.match(question)
+    if not match:
+        return []
+    content = match.group(1).strip()
+    # Split explicit lists while preserving ordinary punctuation inside a fact.
+    facts = [part.strip(" \t,.;:-") for part in re.split(r"\s*(?:;|\n|\band\s+(?=(?:my|i\b|the\b)))\s*", content, flags=re.I)]
+    return [fact[:1000] for fact in facts if fact]
+
+def _memory_hits(question):
+    words = set(re.findall(r"[a-z0-9+#.]+", question.lower())) - {"what","is","my","the","a","an","do","i","have","did","you","remember","tell","me","about","please","can","could","does","which","who","when","where","how"}
+    with connect() as db:
+        rows = [dict(row) for row in db.execute("""
+            SELECT id,content,kind,created_at,'personal' document_id,'Saved memory' filename,0 page FROM personal_memories
+            UNION ALL
+            SELECT m.id,m.content,m.kind,m.created_at,d.id document_id,d.filename,m.page
+            FROM memories m JOIN documents d ON d.id=m.document_id
+            ORDER BY created_at DESC
+        """)]
+    scored=[]
+    for row in rows:
+        fact_words=set(re.findall(r"[a-z0-9+#.]+",row["content"].lower()))
+        overlap=len(words & fact_words)
+        score=overlap/max(1,len(words))
+        if score >= 0.25 or re.search(r"what did i ask you to remember|what do you remember|list my memories|what have i asked you to remember",question,re.I):
+            scored.append((score,row))
+    scored.sort(key=lambda item:(item[0],item[1]["created_at"]),reverse=True)
+    return [{"text":row["content"],"distance":1-score,"metadata":{"document_id":row["document_id"],"filename":row["filename"],"page":row["page"] or 0,"chunk_index":0}} for score,row in scored[:5]]
 
 @router.get("/health")
 async def health():
@@ -52,6 +85,7 @@ async def upload(file: UploadFile = File(...)):
         with connect() as db: db.execute("INSERT INTO activity(event,detail,created_at) VALUES('uploaded',?,?)",(name,now))
         return {"id":doc_id,"filename":name,"status":"ready","chunk_count":len(chunks),"size":len(payload),"created_at":now}
     except Exception as exc:
+        logger.error("Document processing failed (document_id=%s, error_type=%s)",doc_id,type(exc).__name__)
         try: remove_document(doc_id)
         except Exception: pass
         with connect() as db:
@@ -86,32 +120,64 @@ def delete_document(doc_id:str):
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(body:ChatRequest):
+    facts = _memory_intent(body.question)
+    if facts:
+        now=datetime.now(timezone.utc).isoformat()
+        saved=[]
+        try:
+            with connect() as db:
+                for fact in facts:
+                    memory_id=str(uuid.uuid4())
+                    db.execute("INSERT OR IGNORE INTO personal_memories(id,content,kind,created_at) VALUES(?,?,?,?)",(memory_id,fact,"fact",now))
+                    existing=db.execute("SELECT id,content FROM personal_memories WHERE content=? COLLATE NOCASE",(fact,)).fetchone()
+                    if not existing: raise RuntimeError("saved row verification returned no record")
+                    saved.append(existing["content"])
+                persisted=db.execute("SELECT COUNT(*) FROM personal_memories WHERE content IN ("+",".join("?" for _ in saved)+")",saved).fetchone()[0]
+        except Exception as exc:
+            logger.error("Personal memory persistence failed (error_type=%s)",type(exc).__name__)
+            raise HTTPException(500,"Could not save that fact to local memory. Check local storage and try again.") from exc
+        if persisted != len(set(s.lower() for s in saved)):
+            raise HTTPException(500,"The memory could not be verified after saving. Please try again.")
+        return {"answer":f"Saved to your memory: {'; '.join(saved)}","sources":[],"insufficient_context":False}
+    memories=_memory_hits(body.question)
+    if memories:
+        try: text=await ollama.answer_memories(body.question,memories)
+        except RuntimeError as exc: raise HTTPException(503,str(exc)) from exc
+        sources=[Source(document_id=h["metadata"]["document_id"],filename=h["metadata"]["filename"],page=h["metadata"]["page"] or None,passage=h["text"],relevance=round(relevance(h["distance"]),3)) for h in memories]
+        return {"answer":text,"sources":sources,"insufficient_context":False}
     hits=search(body.question,settings.retrieval_count)
-    hits=[h for h in hits if 1-h["distance"] >= 0.22]
-    if not hits: return {"answer":"I couldn't find enough relevant information in your saved documents to answer this reliably.","sources":[],"insufficient_context":True}
+    # Chroma returns distances rather than similarities. Convert using the
+    # metric attached to the collection and reject weak nearest neighbors.
+    hits=[h for h in hits if relevance(h["distance"]) >= settings.retrieval_min_similarity]
+    if not hits: return {"answer":REFUSAL,"sources":[],"insufficient_context":True}
     try:
         text=await ollama.answer(body.question,hits)
     except RuntimeError as exc:
         raise HTTPException(503,str(exc)) from exc
     insufficient=bool(re.search(r"couldn.t find enough relevant information|not enough information|insufficient information", text.lower()))
     if insufficient:
-        text="I couldn't find enough relevant information in your saved documents to answer this reliably."
-    sources=[Source(document_id=h["metadata"]["document_id"],filename=h["metadata"]["filename"],page=h["metadata"]["page"] or None,passage=h["text"],relevance=round(1-h["distance"],3)) for h in hits]
+        text=REFUSAL
+    sources=[Source(document_id=h["metadata"]["document_id"],filename=h["metadata"]["filename"],page=h["metadata"]["page"] or None,passage=h["text"],relevance=round(relevance(h["distance"]),3)) for h in hits]
     return {"answer":text,"sources":sources,"insufficient_context":insufficient}
 
 @router.get("/memories")
 def memories():
-    with connect() as db: return [dict(r) for r in db.execute("SELECT m.id,m.content,m.kind,m.page,m.created_at,d.id document_id,d.filename FROM memories m JOIN documents d ON d.id=m.document_id ORDER BY m.created_at DESC")]
+    with connect() as db:
+        extracted=[dict(r) for r in db.execute("SELECT m.id,m.content,m.kind,m.page,m.created_at,d.id document_id,d.filename FROM memories m JOIN documents d ON d.id=m.document_id")]
+        personal=[dict(r) for r in db.execute("SELECT id,content,kind,NULL page,created_at,'personal' document_id,'Saved memory' filename FROM personal_memories")]
+    return sorted(extracted+personal,key=lambda r:r["created_at"],reverse=True)
 
 @router.delete("/memories/{memory_id}")
 def delete_memory(memory_id:str):
-    with connect() as db: cur=db.execute("DELETE FROM memories WHERE id=?",(memory_id,))
+    with connect() as db:
+        cur=db.execute("DELETE FROM memories WHERE id=?",(memory_id,))
+        if cur.rowcount==0: cur=db.execute("DELETE FROM personal_memories WHERE id=?",(memory_id,))
     if cur.rowcount==0: raise HTTPException(404,"Memory not found.")
     return {"deleted":True}
 
 @router.get("/dashboard")
 def dashboard():
     with connect() as db:
-        docs=db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]; mem=db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        docs=db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]; mem=db.execute("SELECT (SELECT COUNT(*) FROM memories)+(SELECT COUNT(*) FROM personal_memories)").fetchone()[0]
         recent=[dict(r) for r in db.execute("SELECT event,detail,created_at FROM activity ORDER BY id DESC LIMIT 8")]
         return {"documents":docs,"memories":mem,"chunks":collection.count(),"recent_activity":recent,"recent_documents":[dict(r) for r in db.execute("SELECT id,filename,file_type,size,status,created_at FROM documents ORDER BY created_at DESC LIMIT 5")]}

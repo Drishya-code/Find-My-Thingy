@@ -1,6 +1,9 @@
 import json, uuid
+import logging
 from datetime import datetime, timezone
 from app.database.sqlite import connect
+
+logger=logging.getLogger(__name__)
 
 async def extract_memories(document_id, filename, chunks):
     if not chunks: return
@@ -25,5 +28,6 @@ async def extract_memories(document_id, filename, chunks):
                     source_index = item.get("source_index")
                     page = chunks[source_index-1]["page"] if isinstance(source_index, int) and 1 <= source_index <= min(8, len(chunks)) else None
                     db.execute("INSERT INTO memories VALUES (?,?,?,?,?,?)", (str(uuid.uuid4()), document_id, str(item["content"])[:1000], str(item.get("kind","fact"))[:50], page, datetime.now(timezone.utc).isoformat()))
-    except Exception:
+    except Exception as exc:
+        logger.warning("Optional document memory extraction failed (document_id=%s, error_type=%s)",document_id,type(exc).__name__)
         return

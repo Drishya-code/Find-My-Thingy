@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!frontend/.env.example
 .venv/
 __pycache__/
 .pytest_cache/
@@ -11,6 +14,8 @@ storage/chroma/
 storage/models/
 storage/*.sqlite3
 storage/*.db
-/storage/.pytest-tmp/
+/storage/
 /backend/storage/
+/.install-check/
+/.verify-data/
 *.log
