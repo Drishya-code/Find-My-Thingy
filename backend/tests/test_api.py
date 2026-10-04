@@ -148,6 +148,40 @@ def test_personal_memory_is_retrieved_before_documents(client, monkeypatch):
     assert response.status_code==200
     assert response.json()["sources"][0]["filename"]=="Saved memory"
 
+def test_personal_memories_match_paraphrases_and_refuse_unrelated_question(client, monkeypatch):
+    from app.services.embeddings import encode
+    monkeypatch.setattr(routes, "encode", encode)
+    for fact in ("My preferred editor is VS Code.", "My project deadline is 18 November."):
+        saved=client.post("/api/chat",json={"question":f"Remember that {fact}"})
+        assert saved.status_code==200
+    async def answer(question, hits):
+        return hits[0]["text"]
+    monkeypatch.setattr(routes.ollama,"answer_memories",answer)
+    editor=client.post("/api/chat",json={"question":"Which IDE do I normally use?"})
+    assert editor.status_code==200
+    assert "VS Code" in editor.json()["answer"]
+    assert editor.json()["sources"][0]["filename"]=="Saved memory"
+    deadline=client.post("/api/chat",json={"question":"When do I need to finish my project?"})
+    assert deadline.status_code==200
+    assert "18 November" in deadline.json()["answer"]
+    monkeypatch.setattr(routes,"search",lambda *_:[])
+    unrelated=client.post("/api/chat",json={"question":"What is my favorite food?"})
+    assert unrelated.status_code==200
+    assert unrelated.json()["insufficient_context"] is True
+    assert unrelated.json()["sources"]==[]
+
+def test_empty_memory_library_skips_embedding_model(client, monkeypatch):
+    monkeypatch.setattr(routes, "encode", lambda *_: (_ for _ in ()).throw(AssertionError("no memories should not load the embedding model")))
+    assert routes._memory_hits("Which IDE do I normally use?")==[]
+
+def test_memory_embedding_failure_returns_actionable_unavailable_response(client, monkeypatch):
+    client.post("/api/chat",json={"question":"Remember that my editor is VS Code."})
+    def fail(*_): raise RuntimeError("Embedding model unavailable; retry setup with internet access.")
+    monkeypatch.setattr(routes,"encode",fail)
+    response=client.post("/api/chat",json={"question":"Which IDE do I normally use?"})
+    assert response.status_code==503
+    assert "retry setup with internet access" in response.json()["detail"]
+
 def test_remember_request_can_save_multiple_facts(client):
     response=client.post("/api/chat",json={"question":"Remember this: Project deadline is Friday; I use Python 3.12."})
     assert response.status_code==200

@@ -4,12 +4,15 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 function Find-Command($name) { Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1 }
 $py = Find-Command 'py'
 $python = Find-Command 'python'
-if ($py) { $pythonCommand = $py.Source; $pythonArgs = @('-3.12') }
-elseif ($python) { $pythonCommand = $python.Source; $pythonArgs = @() }
-else { throw 'Python 3.12 or newer is required. Install it from python.org and enable the Python launcher.' }
-$pyVersionCode = & $pythonCommand @pythonArgs -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])'
-if ($LASTEXITCODE -ne 0 -or [int]$pyVersionCode -lt 312) { throw "Python 3.12+ is required. Detected version code $pyVersionCode." }
-$pyVersion = "$( [math]::Floor([int]$pyVersionCode / 100) ).$([int]$pyVersionCode % 100)"
+if ($py) {
+  $pyVersionCode = & $py.Source -3.12 -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>$null
+  if ($LASTEXITCODE -eq 0 -and [int]$pyVersionCode -eq 312) { $pythonCommand = $py.Source; $pythonArgs = @('-3.12') }
+}
+if (-not $pythonCommand -and $python) {
+  $pyVersionCode = & $python.Source -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>$null
+  if ($LASTEXITCODE -eq 0 -and [int]$pyVersionCode -eq 312) { $pythonCommand = $python.Source; $pythonArgs = @() }
+}
+if (-not $pythonCommand) { throw 'Python 3.12 is required by the pinned backend dependencies. Install Python 3.12 and rerun this installer.' }
 $node = Find-Command 'node'
 $npm = Find-Command 'npm'
 if (-not $node -or -not $npm) { throw 'Node.js 20.19+ or 22.12+ with npm is required. Install the current Node.js LTS release.' }
@@ -45,4 +48,16 @@ if ($ollamaTags) {
 }
 & (Join-Path $venv 'Scripts\python.exe') -c 'import fastapi, chromadb, sentence_transformers'
 if ($LASTEXITCODE) { throw 'Backend installation verification failed.' }
-Write-Host 'Python, frontend packages and local storage are ready.' -ForegroundColor Green
+Write-Host 'Checking local all-MiniLM-L6-v2 embedding model. The first install downloads it into storage/models; later installs load the cached model.' -ForegroundColor Cyan
+Push-Location (Join-Path $root 'backend')
+try {
+  @'
+from app.services.embeddings import encode
+vectors = encode(["Find My Thingy local model verification."])
+assert len(vectors) == 1 and len(vectors[0]) > 0
+assert all(abs(value) < float("inf") for value in vectors[0])
+print("Embedding model loaded locally and generated a test vector.")
+'@ | & (Join-Path $venv 'Scripts\python.exe') -
+  if ($LASTEXITCODE) { throw 'Embedding model setup failed. Check internet access and storage/models, then rerun the installer; model downloads can resume.' }
+} finally { Pop-Location }
+Write-Host 'Python 3.12, frontend packages, local storage and embedding model are ready.' -ForegroundColor Green

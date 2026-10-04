@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     chunk_overlap_words: int = 100
     retrieval_count: int = 5
     retrieval_min_similarity: float = 0.65
+    memory_min_similarity: float = 0.4
 
 settings = Settings()
 if not settings.data_dir.is_absolute():

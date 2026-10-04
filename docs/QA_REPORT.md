@@ -1,6 +1,6 @@
 # QA report
 
-Updated: 2026-10-04. This report records only checks actually run in the local Windows environment.
+Updated: 2026-10-05. This report records only checks actually run in the local Windows environment.
 
 ## Test environment and safety
 
@@ -58,3 +58,15 @@ Against the isolated local app and actual `gemma3:4b`:
 - Optional memories extracted from uploaded documents remain best effort. Explicit “remember” facts are persisted separately and confirmed only after database verification.
 - The app is a local development web app with a Windows launcher, not a packaged executable or signed installer.
 - `ollama.exe` is present in the standard per-user install location on this machine but was not on PATH. The scripts now check that location. Auto-start with Ollama actually stopped remains unverified.
+
+## Targeted source-audit correction pass — 2026-10-05
+
+- Final backend regression suite: `python -m pytest -q -p no:cacheprovider --basetemp=..\storage\.pytest-targeted-final` from `backend` — **21 passed, 6 dependency/deprecation warnings, 73.61s**. New cases cover the VS Code IDE paraphrase, the 18 November deadline paraphrase, unrelated-question refusal, an empty memory library without model loading, and a clear response when memory embeddings are unavailable.
+- Frontend: `npm.cmd run build` — **passed**; TypeScript and Vite transformed 1,904 modules and emitted the production bundle.
+- Windows PowerShell parser: `install.ps1`, `start.ps1`, and `stop.ps1` — **syntax OK**.
+- Empty-cache embedding test used a brand-new generated directory under ignored `storage/`, verified it was empty before model initialization, downloaded `all-MiniLM-L6-v2`, and generated a 384-dimensional vector. The model cache was cleared in-process and loaded again with `HF_HUB_OFFLINE=1` — **passed**. The generated cache directory was removed afterward; the existing model cache was not used as evidence for first-time setup.
+- Actual Gemma 3 4B integration through FastAPI TestClient with isolated SQLite, ChromaDB, uploads and synthetic Project Starling Markdown — **passed**. Gemma answered the deadline question with the `qa-project.md` citation; answered the paraphrased “Which IDE do I normally use?” question with the saved VS Code fact citation; refused the unrelated Iceland-capital question with no sources; synthetic document and memory deletion succeeded.
+- Clean Windows installer: a source-only project copy under ignored `.install-check/clean-win-targeted` started without `.env`, database, uploads, venv, or npm dependencies. The installer selected Python 3.12, installed backend dependencies into a new virtual environment, `npm ci` added 47 packages and reported 0 vulnerabilities, loaded the copied local model cache, generated a finite verification vector, and reported setup ready — **passed**. The first run exposed an argument-quoting issue in the new Python verification command; the installer was corrected to pass a here-string on stdin and rerun successfully.
+- Windows launcher from that clean install: startup reported ready and the backend health check showed SQLite, ChromaDB, Ollama and Gemma healthy. The frontend returned HTTP 200 on retry (one immediate follow-up request timed out once); duplicate start reused both process IDs; stop removed launcher state and closed its ports — **passed**. With ports 8080/5173 reserved, it selected 8081/5174, backend and Gemma health passed, frontend returned HTTP 200 and CORS preflight passed; stop closed both fallback ports — **passed**.
+- All disposable project copies, isolated data and copied test caches were removed afterward. The real application storage and original embedding cache were preserved.
+- Browser automation remains **unverified**. The CUA browser bridge returned `Transport closed`; no browser screenshots, responsive inspection or click-through checks were performed.

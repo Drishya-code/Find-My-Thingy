@@ -11,6 +11,7 @@ from app.services.extract import extract
 from app.services.chunking import chunk_pages
 from app.services.vector_store import add, search, remove_document, collection, relevance
 from app.services.memory import extract_memories
+from app.services.embeddings import encode
 from app.services import ollama
 
 router = APIRouter(prefix="/api")
@@ -29,7 +30,6 @@ def _memory_intent(question):
     return [fact[:1000] for fact in facts if fact]
 
 def _memory_hits(question):
-    words = set(re.findall(r"[a-z0-9+#.]+", question.lower())) - {"what","is","my","the","a","an","do","i","have","did","you","remember","tell","me","about","please","can","could","does","which","who","when","where","how"}
     with connect() as db:
         rows = [dict(row) for row in db.execute("""
             SELECT id,content,kind,created_at,'personal' document_id,'Saved memory' filename,0 page FROM personal_memories
@@ -38,14 +38,20 @@ def _memory_hits(question):
             FROM memories m JOIN documents d ON d.id=m.document_id
             ORDER BY created_at DESC
         """)]
-    scored=[]
-    for row in rows:
-        fact_words=set(re.findall(r"[a-z0-9+#.]+",row["content"].lower()))
-        overlap=len(words & fact_words)
-        score=overlap/max(1,len(words))
-        if score >= 0.25 or re.search(r"what did i ask you to remember|what do you remember|list my memories|what have i asked you to remember",question,re.I):
-            scored.append((score,row))
-    scored.sort(key=lambda item:(item[0],item[1]["created_at"]),reverse=True)
+    if not rows:
+        return []
+    if re.search(r"what did i ask you to remember|what do you remember|list my memories|what have i asked you to remember", question, re.I):
+        return [{"text":row["content"],"distance":0.0,"metadata":{"document_id":row["document_id"],"filename":row["filename"],"page":row["page"] or 0,"chunk_index":0}} for row in rows[:5]]
+    vectors = encode([question, *(row["content"] for row in rows)])
+    query = vectors[0]
+    scored = []
+    for row, vector in zip(rows, vectors[1:]):
+        # Embeddings are normalized by encode(), so their dot product is cosine
+        # similarity. A separate cutoff prevents returning an unrelated nearest fact.
+        similarity = sum(a * b for a, b in zip(query, vector))
+        if similarity >= settings.memory_min_similarity:
+            scored.append((similarity, row))
+    scored.sort(key=lambda item: (item[0], item[1]["created_at"]), reverse=True)
     return [{"text":row["content"],"distance":1-score,"metadata":{"document_id":row["document_id"],"filename":row["filename"],"page":row["page"] or 0,"chunk_index":0}} for score,row in scored[:5]]
 
 @router.get("/health")
@@ -139,7 +145,10 @@ async def chat(body:ChatRequest):
         if persisted != len(set(s.lower() for s in saved)):
             raise HTTPException(500,"The memory could not be verified after saving. Please try again.")
         return {"answer":f"Saved to your memory: {'; '.join(saved)}","sources":[],"insufficient_context":False}
-    memories=_memory_hits(body.question)
+    try:
+        memories=_memory_hits(body.question)
+    except RuntimeError as exc:
+        raise HTTPException(503,str(exc)) from exc
     if memories:
         try: text=await ollama.answer_memories(body.question,memories)
         except RuntimeError as exc: raise HTTPException(503,str(exc)) from exc

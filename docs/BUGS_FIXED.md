@@ -37,3 +37,22 @@
 - **Fix:** Add installer/start/stop batch entry points and PowerShell scripts; choose free ports, set the frontend API and CORS origin consistently, wait for health/HTTP checks, record owned PIDs, recognize the Uvicorn child process, and stop only matching app processes.
 - **Files:** `Install-FindMyThingy.bat`, `Start-FindMyThingy.bat`, `Stop-FindMyThingy.bat`, `scripts/windows/*.ps1`, `backend/app/main.py`, `docs/WINDOWS_SETUP.md`, `README.md`.
 - **Evidence:** Installer completed; launcher passed normal and occupied-port checks, reused process IDs on duplicate start and stopped its app process tree. Ollama was left running and its automatic startup path was not tested.
+
+## First-time embedding model setup failed on an empty cache
+
+- **Before:** `SentenceTransformer` always used `local_files_only=True`, so the first install could not obtain `all-MiniLM-L6-v2`; the Windows installer only created the model-cache directory and never verified a vector could be generated.
+- **Fix:** Attempt local-only model loading first. If the model is not cached, download it into the configured local Hugging Face cache using its resumable cache, with an actionable error if the download is offline or fails. The Windows installer now initializes the model and generates a finite test vector before it reports success. Later operations use the local cache.
+- **Documentation:** README and Windows setup docs describe the one-time download, cache location, internet requirement, retry behavior and local subsequent use.
+- **Evidence:** A newly created empty isolated cache downloaded the model and produced a 384-dimensional vector. After clearing the in-process model cache, the model loaded again with Hugging Face offline mode. The isolated cache was deleted; the pre-existing user cache was not used for this test.
+
+## Windows Python version selection did not match its requirement text
+
+- **Before:** The installer forced `py -3.12` when the launcher was present, but its fallback accepted any Python 3.12+ interpreter. Documentation claimed 3.12 or newer despite dependencies only being exercised with 3.12.
+- **Fix:** Select exactly Python 3.12 through the launcher; without it, accept `python` only if its detected major/minor is exactly 3.12. Update README and Windows prerequisites to state the supported version accurately.
+- **Evidence:** The clean-install installer run selected Python 3.12 from the Python launcher and completed setup; PowerShell parser validation passed. See QA_REPORT.md for the run details.
+
+## Paraphrased personal-memory questions missed saved facts
+
+- **Before:** `_memory_hits()` required token overlap, so semantic equivalents such as “Which IDE do I normally use?” could miss “My preferred editor is VS Code.”
+- **Fix:** Embed the question and saved memory content with the existing local SentenceTransformer, rank by cosine similarity, and return only results meeting a dedicated `0.4` memory threshold. An empty library avoids model initialization. Document vector search keeps its independent existing threshold. Explicit requests to list/recall memories continue to list recent saved records.
+- **Evidence:** Backend tests pass for the VS Code and 18 November deadline paraphrases, a food-preference mismatch refusal, and an empty memory library. Actual Gemma integration also answered the IDE paraphrase with its saved-memory citation and refused an unrelated question.
