@@ -11,5 +11,6 @@ storage/chroma/
 storage/models/
 storage/*.sqlite3
 storage/*.db
+/storage/.pytest-tmp/
 /backend/storage/
 *.log
